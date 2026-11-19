@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "conda-why"
+version = "0.1.0"
+description = "Explains conda solver failures and implicit constraints — why can't this install?"
+requires-python = ">=3.11"
+classifiers = [
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy"
+]
+dependencies = [
+  "conda",
+]
+
+[project.scripts]
+conda-why = "conda_why.cli:main"
+
+[project.entry-points.conda]
+conda-why = "conda_why.plugin"
+
+[tool.setuptools]
+packages = ["conda_why"]
