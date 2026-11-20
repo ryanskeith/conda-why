@@ -85,8 +85,10 @@ Rules:
 
 Exit codes:
 - `0`: a diagnosis or query answer was produced (healthy, unsatisfiable, or package not found)
-- `1`: no answer (invalid spec, missing environment, no query match, internal error)
-- `2`: not implemented (`--compare-solvers`)
+- `1`: no answer (invalid invocation or spec, missing environment, no query match,
+  internal error)
+- `2`: not implemented (`--compare-solvers`, `--last` before Phase 6) or an argparse
+  usage error such as an unknown option
 - `--json` writes one complete JSON document to stdout on exit 0, and on exit 1 for a
   no-match or invalid request (`ok: false`, empty results). Internal errors write to
   stderr and emit no JSON.
@@ -95,7 +97,7 @@ Exit codes:
 
 ## CLI
 
-    conda why <spec>                              # provenance query, no solve
+    conda why query   <spec>                      # provenance query, no solve
     conda why create  <specs...> [-n|-p ...]      # dry-run solve + explain
     conda why install <specs...> [-n|-p ...]
     conda why update  <specs...> [-n|-p ...]
@@ -104,12 +106,18 @@ Exit codes:
 
 Flags (all modes): `--json`, `--explain`, `-c/--channel`, `--override-channels`
 Stubbed: `--compare-solvers` exits 2 with "not implemented: only one adapter available".
+`--last` is stubbed with the same exit code until Phase 6.
 Alias: `conda wtf`, registered with `CondaSubcommand(aliases=("wtf",))`. Conda has no
 hidden-subcommand flag, so `wtf` appears in `conda --help` with a terse summary.
 
-Dispatch: the first positional is a mode only when it is exactly one of
-`create|install|update|remove`; otherwise the invocation is query mode. A package named
-`install` must be queried as `conda why "install"` and cannot collide with a mode.
+Dispatch: the first positional is always the mode and must be exactly one of
+`query|create|install|update|remove`. `--last` is the only invocation without a mode.
+A bare spec is treated as an unknown mode and fails as an argparse usage error (exit 2)
+that lists the valid modes, so a package named `install` is queried as
+`conda why query install`; mode names are reserved words and never mean a package.
+`--json`, `--explain`, `-c/--channel`, `--override-channels`, and `--compare-solvers`
+are accepted before or after the mode; `-n`/`-p` follow the mode, as they do for
+conda's own commands.
 
 Behavior:
 - Never mutates any environment. All solves are dry-run.
@@ -120,7 +128,8 @@ Behavior:
   matches the query, regardless of version; when the query carries a version or build,
   annotate each finding with whether that constraint admits it (`allows 2.1`, `excludes
   2.1`). Conda has no spec-vs-spec matcher, so compare fields against a record synthesized
-  from the query. Print every matching constraint with its source. A query that matches
+  from the query; annotations therefore cover concrete versions and prefixes (`numpy=2.1`)
+  but not range-only queries. Print every matching constraint with its source. A query that matches
   nothing exits 1.
 - Use `CondaSubcommand(configure_parser=...)` so argparse is integrated with conda's.
 
@@ -153,7 +162,8 @@ Tentative.
 - `ProvenanceRecord`: `constraint`, `source` (file path / config key / rule id / record),
   `revision: int | None`, `timestamp: datetime | None`, `detail: str`
 - `ConflictSet`: `constraints: list[Constraint]`, `provenance: list[ProvenanceRecord]`
-  (same length and order as `constraints`), `solver: str`, `solver_calls: int`
+  (same length and order as `constraints`), `solver: str`, `solver_calls: int`,
+  `raw_error: str` (solver text, kept for `--explain` and `--json`)
 - `Finding`: `subject: str` (package or spec), `claim: str` (one plain sentence),
   `provenance: ProvenanceRecord`
 - `NextStep`: `text: str` (a command or plain action), `note: str | None`
@@ -183,12 +193,17 @@ Tentative.
 
 `SolveRequest` carries the operation (`create|install|update|remove`), prefix (which may
 not exist for `create`), channels, subdirs, specs to add, specs to remove, update
-modifier, and the constraints the solve must ignore for MUS (Spike A decides the
-mechanism). This is why the adapter is command-aware: `install`/`update`/`remove` read
-the target environment, `create` does not.
+modifier, and `ignored_constraints: tuple[IgnoredConstraint, ...]` for MUS.
+`IgnoredConstraint` is `(kind, spec, source)`: user specs are omitted from the request,
+history and `conda-meta/pinned` entries are relaxed by solving against an overlay prefix
+with those entries rewritten, and condarc `pinned_packages` can only be dropped as a
+group via `ignore_pinned`. This is why the adapter is command-aware:
+`install`/`update`/`remove` read the target environment, `create` does not.
 
 `SolveResult` is either success (`records: list[PackageRecord]`) or failure with
 `error_kind: Literal["unsatisfiable", "not_found", "other"]` and `raw_error: str`.
+A requested-versus-pin conflict also fills `pinned_conflict` with the requested specs,
+pinned specs, and prefix, because conda raises it before the solver runs.
 `not_found` means no candidate exists for a requested spec, which conda raises separately
 from an unsatisfiable solve. `solver_calls` counts every `solve()` the adapter performs,
 including seeded probes; `conflict_hint` and `candidates` do not count.
@@ -227,8 +242,9 @@ Command-aware collection:
 
 Parsing rules:
 - History: read the requested specs recorded by conda, not every installed package;
-  capture revision and timestamp when present. Skip malformed lines and note the skip in
-  `detail`.
+  capture revision and timestamp when present. Conda only keeps a spec when its package
+  is still installed, so a requested package that was later removed contributes nothing.
+  Skip malformed lines and note the skip in `detail`.
 - Pins: `conda-meta/pinned` wins over `pinned_packages`; the `source` string names the
   file or config key.
 - Missing files are not errors; the source simply contributes nothing.
@@ -258,6 +274,11 @@ match wins. No LLM calls, no solver imports.
 minimize, so job mode branches before the MUS loop when the solve fails with `not_found`
 or with no candidate for the current subdirs.
 
+MVP implements every kind except `channel_priority` and `virtual_package`; those
+failures fall through to `unknown` until a later phase. `incompatible_specs` compares two
+user constraints; when the blocking requirement belongs to an installed package, the
+diagnosis is `installed_constraint` instead.
+
 Findings always carry the provenance that made the constraint visible, so the hidden
 sources (history, pins, installed records, special cases) appear by name in the default
 output. Next steps come from per-kind templates: `unsupported_python` offers "pin the
@@ -269,19 +290,21 @@ offers nothing. Every command echoes the request's `-n`/`-p` and channel flags.
 ### mus.py
 
 Evidence extraction, not the product. Job mode skips MUS when the solve failed with
-`not_found` or with no candidate for the current subdirs; those diagnoses come from
-candidate metadata alone. Otherwise, deletion-based over `user | history | pinned`
+`not_found`, with no candidate for the current subdirs, or with a `pinned_conflict`;
+those diagnoses come from candidate metadata or the structured pin error alone. Otherwise, deletion-based over `user | history | pinned`
 constraints in that order: for each relaxable constraint, re-solve without it. If the
 solve is still UNSAT, drop the constraint permanently; otherwise keep it. The result is a
-minimal UNSAT subset. `installed` and `special_case` constraints are never dropped but are
-always reported when they appear in the conflict. No call or time limit for MVP; record
-`solver_calls`. When several irreducible sets exist, the first one found in that iteration
+minimal UNSAT subset. `installed` and `special_case` constraints are never dropped; they join the
+set when their package name appears in the minimal set or in the seed. Relaxation goes
+through `IgnoredConstraint` records (user omitted, history and prefix pins via overlay,
+condarc pins as a group). No call or time limit for MVP; `solver_calls` includes the
+initial failed solve and every probe. When several irreducible sets exist, the first one found in that iteration
 order is reported.
 
 Seeding: if `conflict_hint` (or a `FailedSolve.seed`) is available, try the seeded subset
 first. If the seeded subset is UNSAT on its own, run deletion only within the seed.
-Otherwise, fall back to the full constraint set. Treat the seed as a hint, never as the
-result.
+Otherwise, fall back to the full constraint set. Skip the seed probe when the seed covers
+every relaxable constraint. Treat the seed as a hint, never as the result.
 
 ### last.py (STRETCH)
 - Location: conda's user-level data directory, `~/.conda/why/last_failed_solve.json` by
@@ -335,6 +358,10 @@ the MVP and document the needed upstream hook. Timebox one working session.
   8. No build for the current subdir
   9. Healthy solve with implicit history pin reported
   10. Unknown fallback: up to three findings shown, no advice
+- Real solver output corpus: collect `UnsatisfiableError` texts from public GitHub issues
+  and pull requests, reproduce the ones that still solve against the synthetic channel,
+  and keep the texts as fixtures for `conflict_hint` parsing. Prefer these over
+  hand-written solver text when extending diagnosis rules.
 - For every scenario assert `Diagnosis.kind`, the culprit subjects, the provenance kinds,
   and whether next steps are present.
 - MUS seeding: a correct seed reduces `solver_calls`; a wrong or partial seed still yields
@@ -384,7 +411,7 @@ Phase 2 without flagging it in the change summary.
 - Hidden constraints (history, pins, installed records, special cases) are named with
   their source in default output
 - Suggested commands echo the request's `-n`/`-p` and channel flags
-- `conda why python` in a real environment reports history and pin provenance
+- `conda why query python` in a real environment reports history and pin provenance
 - `--json` is beta, versioned, and round-trips through `schema.py`
 - The unknown fallback shows at most three findings and never invents advice
 - `conda wtf` behaves identically to `conda why`

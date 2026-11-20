@@ -19,14 +19,15 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy"
 ]
 dependencies = [
-  "conda",
+  "conda>=26.10.0",
+  "conda-rattler-solver>=26.10,<27",
 ]
-
-[project.scripts]
-conda-why = "conda_why.cli:main"
 
 [project.entry-points.conda]
 conda-why = "conda_why.plugin"
 
-[tool.setuptools]
-packages = ["conda_why"]
+[tool.setuptools.packages.find]
+include = ["conda_why*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

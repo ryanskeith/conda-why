@@ -9,30 +9,29 @@ on:
       - main
 
 jobs:
-  build:
-
+  test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@v3
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Add conda to system path
+      - uses: actions/checkout@v4
+
+      - name: Create test environment
         run: |
-          # $CONDA is an environment variable pointing to the root of the miniconda directory
-          echo $CONDA/bin >> $GITHUB_PATH
-      - name: Install dependencies (conda)
-        run: |
-          conda env update --file environment.yml --name base
-          conda install --file requirements.dev.txt
-      - name: Install conda-basic-auth
-        run: |
-          pip install -e .
-      - name: Test with pytest
-        run: |
-          pytest --doctest-modules
+          conda create -y -q -n test -c conda-forge --override-channels \
+            "python=${{ matrix.python-version }}" \
+            "conda>=26.10" \
+            "conda-rattler-solver>=26.10,<27" \
+            pip setuptools
+
+      - name: Install dev tools
+        run: conda install -y -q -n test --file requirements.dev.txt
+
+      - name: Install plugin
+        run: conda run -n test python -m pip install --no-deps --no-build-isolation -e .
+
+      - name: Run tests
+        run: conda run -n test python -m pytest
