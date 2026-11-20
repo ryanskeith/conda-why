@@ -59,7 +59,7 @@ class CrsAdapter:
             with _relaxed_prefix(request.prefix, ignored) as prefix:
                 records = self._solve(prefix, request, ignored)
         except PackagesNotFoundError as exc:
-            return _failure("not_found", exc)
+            return _failure("unsatisfiable", exc)
         except SpecsConfigurationConflictError as exc:
             return _failure("unsatisfiable", exc, pin_conflict=_pin_conflict(exc))
         except UnsatisfiableError as exc:

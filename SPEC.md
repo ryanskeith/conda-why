@@ -21,6 +21,8 @@ Scaffold: `conda/conda-plugin-template` (cookiecutter)
   solver's full exploration
 - Surface hidden constraints and say where each came from
 - Offer a safe next step or two when the cause is unambiguous
+- Explain missing build coverage: the package exists, but not for the requested Python or
+  platform
 - Define a solver-agnostic diagnosis and evidence schema (beta prototype for a future
   standardized `UnsatisfiableError` payload)
 - Explore saving the last failed solve so conda-why can re-explain it without retyping
@@ -31,6 +33,9 @@ Scaffold: `conda/conda-plugin-template` (cookiecutter)
   - Fallback UX: up-arrow to the failed command and insert `why` after `conda`.
 
 ## Non-goals (MVP)
+- Plain package-not-found (a typo, a renamed package, a channel that is not enabled).
+  conda's own message already names the missing package; conda-why exits 1 with a one-line
+  pointer instead of diagnosing it.
 - Multiple solver adapters (interface + one implementation). Target conda-rattler-solver.
 - `--compare-solvers` (stubbed)
 - Computing exact fallback versions (for example "the newest numpy for Python 3.9 is
@@ -83,10 +88,23 @@ Rules:
 - When no rule matches, say conda-why could not identify a single cause, show up to three
   findings with sources, and offer no advice.
 
+### Not a diagnosis
+
+Plain missing packages are conda's message to deliver. When no requested spec, and no
+direct dependency of one, has a candidate in any enabled channel or subdir, conda-why
+prints one line and exits 1:
+
+    conda-why: "nope" was not found in any enabled channel or subdir. conda-why explains
+    missing builds for the requested Python or platform, not missing packages.
+
+The same message names the requesting package when the missing name is a dependency
+(`"broken" requires "missingdep", ...`). No diagnosis, findings, or next steps are
+produced, and `--json` writes `ok: false`.
+
 Exit codes:
-- `0`: a diagnosis or query answer was produced (healthy, unsatisfiable, or package not found)
+- `0`: a diagnosis or query answer was produced (healthy or unsatisfiable)
 - `1`: no answer (invalid invocation or spec, missing environment, no query match,
-  internal error)
+  missing package, internal error)
 - `2`: not implemented (`--compare-solvers`, `--last` before Phase 6) or an argparse
   usage error such as an unknown option
 - `--json` writes one complete JSON document to stdout on exit 0, and on exit 1 for a
@@ -168,7 +186,7 @@ Tentative.
   `provenance: ProvenanceRecord`
 - `NextStep`: `text: str` (a command or plain action), `note: str | None`
 - `Diagnosis`: `kind: Literal["unsupported_python", "unsupported_platform",
-  "package_not_found", "incompatible_specs", "pinned_constraint", "installed_constraint",
+  "incompatible_specs", "pinned_constraint", "installed_constraint",
   "channel_priority", "virtual_package", "build_variant", "unknown"]`,
   `headline: str`, `findings: list[Finding]` (0-3), `next_steps: list[NextStep]` (0-2)
 - `WhyReport`: `mode: Literal["query", "job"]`, `ok: bool`, `diagnosis: Diagnosis | None`,
@@ -201,12 +219,13 @@ group via `ignore_pinned`. This is why the adapter is command-aware:
 `install`/`update`/`remove` read the target environment, `create` does not.
 
 `SolveResult` is either success (`records: list[PackageRecord]`) or failure with
-`error_kind: Literal["unsatisfiable", "not_found", "other"]` and `raw_error: str`.
-A requested-versus-pin conflict also fills `pinned_conflict` with the requested specs,
-pinned specs, and prefix, because conda raises it before the solver runs.
-`not_found` means no candidate exists for a requested spec, which conda raises separately
-from an unsatisfiable solve. `solver_calls` counts every `solve()` the adapter performs,
-including seeded probes; `conflict_hint` and `candidates` do not count.
+`error_kind: Literal["unsatisfiable", "other"]` and `raw_error: str`. A
+requested-versus-pin conflict also fills `pinned_conflict` with the requested specs,
+pinned specs, and prefix, because conda raises it before the solver runs. A missing
+package arrives as a failed solve, like any other; `diagnose.missing_build()` decides
+whether it is missing build coverage or out of scope. `solver_calls` counts every
+`solve()` the adapter performs, including seeded probes; `conflict_hint` and `candidates`
+do not count.
 
 `candidates` returns the metadata the diagnosis needs: version, build, subdir, channel,
 and `depends` for each candidate, optionally filtered to candidates compatible with a
@@ -261,7 +280,6 @@ match wins. No LLM calls, no solver imports.
 | --- | --- | --- |
 | `unsupported_python` | package candidate requires a Python range that excludes the Python constraint in play | "<pkg> <ver> is not compatible with Python <x> in this environment." |
 | `unsupported_platform` | candidates exist for another subdir but none for the current subdirs | "<pkg> has no build for <subdir>." |
-| `package_not_found` | no candidate exists for a requested spec in any enabled channel or subdir | "<pkg> was not found in your configured channels." |
 | `incompatible_specs` | two constraints require disjoint ranges of one package | "<a> and <b> need incompatible versions of <pkg>." |
 | `pinned_constraint` | a pin is in the minimal set | "<pkg> is held by a conda pin in <source>." |
 | `installed_constraint` | an installed record's requirement is in the minimal set | "<installed> currently requires <pkg> <range>." |
@@ -270,9 +288,9 @@ match wins. No LLM calls, no solver imports.
 | `build_variant` | same package name, incompatible build strings or variants | "<a> and <b> need different builds of <pkg>." |
 | `unknown` | nothing above matched | "conda-why could not identify a single cause." |
 
-`package_not_found` and `unsupported_platform` skip MUS: there is no conflict set to
-minimize, so job mode branches before the MUS loop when the solve fails with `not_found`
-or with no candidate for the current subdirs.
+`unsupported_platform` skips MUS: there is no conflict set to minimize, so job mode
+branches before the MUS loop when a requested spec, or a direct dependency, has no build
+for the current subdirs but does have one elsewhere.
 
 MVP implements every kind except `channel_priority` and `virtual_package`; those
 failures fall through to `unknown` until a later phase. `incompatible_specs` compares two
@@ -282,16 +300,15 @@ diagnosis is `installed_constraint` instead.
 Findings always carry the provenance that made the constraint visible, so the hidden
 sources (history, pins, installed records, special cases) appear by name in the default
 output. Next steps come from per-kind templates: `unsupported_python` offers "pin the
-package back" and "move Python to the range the package requires", `package_not_found`
-offers checking the spelling and enabling the channel that carries it,
+package back" and "move Python to the range the package requires",
 `installed_constraint` offers "update or remove the blocking package", and `unknown`
 offers nothing. Every command echoes the request's `-n`/`-p` and channel flags.
 
 ### mus.py
 
-Evidence extraction, not the product. Job mode skips MUS when the solve failed with
-`not_found`, with no candidate for the current subdirs, or with a `pinned_conflict`;
-those diagnoses come from candidate metadata or the structured pin error alone. Otherwise, deletion-based over `user | history | pinned`
+Evidence extraction, not the product. Job mode skips MUS when `missing_build` finds no
+build for the current subdirs, or when the result carries a `pinned_conflict`; those
+diagnoses come from candidate metadata or the structured pin error alone. Otherwise, deletion-based over `user | history | pinned`
 constraints in that order: for each relaxable constraint, re-solve without it. If the
 solve is still UNSAT, drop the constraint permanently; otherwise keep it. The result is a
 minimal UNSAT subset. `installed` and `special_case` constraints are never dropped; they join the
@@ -354,8 +371,8 @@ the MVP and document the needed upstream hook. Timebox one working session.
   4. Two user specs directly conflict on a shared dependency
   5. User spec conflicts with an installed record's requirement
   6. `pinned_packages` or `conda-meta/pinned` blocks the request
-  7. Requested package exists in no enabled channel or subdir
-  8. No build for the current subdir
+  7. Missing package is out of scope: exit 1, one-line pointer, no diagnosis
+  8. No build for the current subdir, for the request or a direct dependency
   9. Healthy solve with implicit history pin reported
   10. Unknown fallback: up to three findings shown, no advice
 - Real solver output corpus: collect `UnsatisfiableError` texts from public GitHub issues
@@ -406,8 +423,9 @@ Phase 2 without flagging it in the change summary.
 - Read-only: any code path that could mutate a prefix is a bug
 
 ## MVP acceptance
-- The ten synthetic diagnosis scenarios produce the expected diagnosis kind, culprits,
+- The nine synthetic diagnosis scenarios produce the expected diagnosis kind, culprits,
   and provenance kinds; actionable kinds include at least one next step
+- The out-of-scope missing package exits 1 with the pointer and produces no diagnosis
 - Hidden constraints (history, pins, installed records, special cases) are named with
   their source in default output
 - Suggested commands echo the request's `-n`/`-p` and channel flags
@@ -419,7 +437,7 @@ Phase 2 without flagging it in the change summary.
 - STRETCH (not required): `--last` works for failures from normal conda commands
 
 ## Open questions (post-MVP)
-- Which additional real-world failure cases get first-class diagnoses (renamed packages,
-  solver gave up, multiple independent conflicts)
+- Which additional real-world failure cases get first-class diagnoses (solver gave up,
+  multiple independent conflicts)
 - Computing exact fallback versions for suggestions
 - `conda env create` and environment.yml support

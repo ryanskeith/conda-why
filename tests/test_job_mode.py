@@ -154,16 +154,31 @@ def test_pinned_package_blocks_the_request(
     assert data["diagnosis"]["next_steps"]
 
 
-def test_package_not_found(
-    run_job: RunJob, tmp_path: Path
-) -> None:
+def test_missing_package_is_out_of_scope(run_job: RunJob, tmp_path: Path) -> None:
     result = run_job(
         "create", "definitely-not-a-package", "-p", str(tmp_path / "env"), json_output=True
     )
-    data = payload(result)
 
-    assert data["diagnosis"]["kind"] == "package_not_found"
-    assert len(data["diagnosis"]["next_steps"]) == 2
+    assert result.returncode == 1
+    data = json.loads(result.stdout)
+    assert data["ok"] is False
+    assert data["mode"] == "job"
+    assert data["diagnosis"] is None
+    assert "not found in any enabled channel" in result.stderr
+    assert "missing builds" in result.stderr
+
+
+def test_missing_dependency_is_out_of_scope(
+    run_job: RunJob, tmp_path: Path
+) -> None:
+    result = run_job(
+        "create", "broken", "-p", str(tmp_path / "env"), json_output=True
+    )
+
+    assert result.returncode == 1
+    assert "broken" in result.stderr
+    assert "missingdep" in result.stderr
+    assert "missing builds" in result.stderr
 
 
 def test_package_for_another_platform(
@@ -200,7 +215,9 @@ def test_healthy_solve_reports_implicit_constraints(
 def test_unknown_fallback_offers_no_advice(
     run_job: RunJob, tmp_path: Path
 ) -> None:
-    result = run_job("create", "broken", "-p", str(tmp_path / "env"), json_output=True)
+    result = run_job(
+        "create", "python=3.9", "python=3.10", "-p", str(tmp_path / "env"), json_output=True
+    )
     data = payload(result)
 
     assert data["diagnosis"]["kind"] == "unknown"

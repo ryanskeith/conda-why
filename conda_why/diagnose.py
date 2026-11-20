@@ -37,15 +37,14 @@ class DiagnosisRequest:
     adapter: SolverAdapter
     result: SolveResult
     conflict: ConflictSet
+    missing: MissingBuild | None = None
 
 
 def diagnose(request: DiagnosisRequest) -> Diagnosis:
-    if request.result.error_kind == "not_found":
-        missing = _missing(request)
-        if missing is not None:
-            return missing
     if request.result.pinned_conflict is not None:
         return _pinned_conflict(request)
+    if request.missing is not None and request.missing.other_subdirs:
+        return _unsupported_platform(request, request.missing)
     for rule in (
         _unsupported_python,
         _incompatible_specs,
@@ -399,68 +398,106 @@ def _build_variant(request: DiagnosisRequest) -> Diagnosis | None:
     return None
 
 
-def _missing(request: DiagnosisRequest) -> Diagnosis | None:
-    missing = []
-    for spec in request.specs:
-        if request.adapter.candidates(spec):
-            continue
-        other_subdirs = [
-            subdir
-            for subdir in _alternate_subdirs(request.adapter.subdirs)
-            if request.adapter.candidates(spec, subdirs=(subdir,))
-        ][:1]
-        missing.append((spec, other_subdirs))
-    if not missing:
-        return None
+@dataclass(frozen=True)
+class MissingBuild:
+    subject: str
+    spec: str
+    requested_by: str | None
+    other_subdirs: tuple[str, ...]
 
-    spec, other_subdirs = missing[0]
-    name = _spec_name(spec) or spec
-    record = _find_record(request, name, "user") or ProvenanceRecord(
-        constraint=Constraint.create(spec, "user"),
+    def scope_message(self) -> str:
+        if self.requested_by is None:
+            message = (
+                f'"{self.subject}" was not found in any enabled channel or subdir.'
+            )
+        else:
+            message = (
+                f'"{self.requested_by}" requires "{self.subject}", which was not '
+                "found in any enabled channel or subdir."
+            )
+        return (
+            f"{message} conda-why explains missing builds for the requested "
+            "Python or platform, not missing packages."
+        )
+
+
+def missing_build(
+    adapter: SolverAdapter, specs: Sequence[str]
+) -> MissingBuild | None:
+    for spec in specs:
+        problem = _absent_build(adapter, spec, None)
+        if problem is not None:
+            return problem
+
+    for spec in specs:
+        candidates = adapter.candidates(spec)
+        if not candidates:
+            continue
+        requested_by = _spec_name(spec)
+        for dependency in candidates[0].depends:
+            name = MatchSpec(dependency).name
+            if name is None or adapter.candidates(name):
+                continue
+            problem = _absent_build(adapter, dependency, requested_by)
+            if problem is not None:
+                return problem
+    return None
+
+
+def _absent_build(
+    adapter: SolverAdapter, spec: str, requested_by: str | None
+) -> MissingBuild | None:
+    if adapter.candidates(spec):
+        return None
+    other_subdirs = tuple(
+        subdir
+        for subdir in _alternate_subdirs(adapter.subdirs)
+        if adapter.candidates(spec, subdirs=(subdir,))
+    )[:1]
+    return MissingBuild(
+        subject=_spec_name(spec) or spec,
+        spec=spec,
+        requested_by=requested_by,
+        other_subdirs=other_subdirs,
+    )
+
+
+def _unsupported_platform(
+    request: DiagnosisRequest, missing: MissingBuild
+) -> Diagnosis:
+    subdirs = request.adapter.subdirs
+    target = subdirs[0] if subdirs else "this platform"
+    headline = f"{missing.subject} has no build for {target}."
+    record = _find_record(
+        request, missing.requested_by or missing.subject, "user"
+    ) or ProvenanceRecord(
+        constraint=Constraint.create(missing.spec, "user"),
         source="command line",
     )
-    if other_subdirs:
-        target = request.adapter.subdirs[0] if request.adapter.subdirs else "this platform"
-        headline = f"{name} has no build for {target}."
-        findings = [
-            Finding(
-                subject=name,
-                claim=f"{spec} is only available for {', '.join(other_subdirs)}",
-                provenance=record,
-            )
-        ]
-        steps = [
-            NextStep(
-                text=(
-                    f"Use a platform that has a build of {name}, "
-                    "or choose another package."
-                )
-            )
-        ]
-        return Diagnosis(
-            kind="unsupported_platform",
-            headline=headline,
-            findings=findings,
-            next_steps=steps,
+    available = ", ".join(missing.other_subdirs)
+    if missing.requested_by:
+        claim = (
+            f"{missing.requested_by} requires {missing.spec}, "
+            f"which is only available for {available}"
         )
-
-    headline = f"{name} was not found in your configured channels."
+    else:
+        claim = f"{missing.spec} is only available for {available}"
     findings = [
-        Finding(
-            subject=name,
-            claim=f"{spec} was not found in any enabled channel or subdir",
-            provenance=record,
-        )
+        Finding(subject=missing.subject, claim=claim, provenance=record)
     ]
     steps = [
-        NextStep(text=f"Check the spelling of {name}."),
-        NextStep(text=f"Add the channel that provides {name} with -c CHANNEL."),
+        NextStep(
+            text=(
+                f"Use a platform that has a build of {missing.subject}, "
+                "or choose another package."
+            )
+        )
     ]
     return Diagnosis(
-        kind="package_not_found",
+        kind="unsupported_platform",
         headline=headline,
-        findings=findings,
-        next_steps=steps,
+        findings=findings[:MAX_FINDINGS],
+        next_steps=steps[:MAX_NEXT_STEPS],
     )
 
 

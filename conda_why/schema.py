@@ -27,7 +27,6 @@ RELAXABLE: dict[str, bool] = {
 DiagnosisKind = Literal[
     "unsupported_python",
     "unsupported_platform",
-    "package_not_found",
     "incompatible_specs",
     "pinned_constraint",
     "installed_constraint",

@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from conda.models.records import PackageRecord
 
 Operation = Literal["create", "install", "update", "remove"]
-ErrorKind = Literal["unsatisfiable", "not_found", "other"]
+ErrorKind = Literal["unsatisfiable", "other"]
 
 
 @dataclass(frozen=True)

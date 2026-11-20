@@ -97,14 +97,19 @@ def cases(channel: Path, base: Path) -> list[tuple[str, list[str], str]]:
             "pinned_constraint",
         ),
         case(
-            "package not found",
+            "missing package is out of scope",
             [
                 "create",
                 "definitely-not-a-package",
                 "-p",
                 str(base / "envs" / "missing"),
             ],
-            "package_not_found",
+            "out_of_scope",
+        ),
+        case(
+            "missing dependency is out of scope",
+            ["create", "broken", "-p", str(base / "envs" / "broken")],
+            "out_of_scope",
         ),
         case(
             "package exists only for osx-64",
@@ -117,8 +122,14 @@ def cases(channel: Path, base: Path) -> list[tuple[str, list[str], str]]:
             "healthy",
         ),
         case(
-            "unknown fallback (missing dependency)",
-            ["create", "broken", "-p", str(base / "envs" / "broken")],
+            "unknown fallback (duplicate python specs)",
+            [
+                "create",
+                "python=3.9",
+                "python=3.10",
+                "-p",
+                str(base / "envs" / "duplicate"),
+            ],
             "unknown",
         ),
     ]
@@ -178,6 +189,13 @@ def main() -> int:
         result = subprocess.run(
             command, env=env, capture_output=True, text=True, timeout=600
         )
+        if expected == "out_of_scope":
+            print(result.stderr.strip())
+            if result.returncode == 1 and "missing builds" in result.stderr:
+                continue
+            print("[expected an out-of-scope exit 1]")
+            failures += 1
+            continue
         if result.returncode != 0:
             print(result.stderr.strip())
             failures += 1

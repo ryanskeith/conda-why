@@ -94,11 +94,13 @@ def test_conflict_hint_is_empty_on_success(
     assert adapter.conflict_hint(result) == []
 
 
-def test_missing_package_is_not_found(adapter: CrsAdapter, tmp_path: Path) -> None:
+def test_missing_package_is_a_failed_solve(
+    adapter: CrsAdapter, tmp_path: Path
+) -> None:
     result = adapter.solve(request("create", tmp_path / "newenv", add=("nope",)))
 
     assert not result.ok
-    assert result.error_kind == "not_found"
+    assert result.error_kind == "unsatisfiable"
     assert "nope" in result.raw_error
 
 

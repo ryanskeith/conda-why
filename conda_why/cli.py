@@ -25,6 +25,10 @@ _MODE_HELP = {
 def configure_parser(parser: ArgumentParser) -> None:
     _add_shared_options(parser, last=True)
     parser.set_defaults(mode=None, specs=())
+    parser.epilog = (
+        "Explains conflicts and missing builds for the requested Python or platform. "
+        "Plain missing packages are left to conda's own message."
+    )
     subparsers = parser.add_subparsers(
         dest="mode",
         metavar="MODE",
@@ -253,7 +257,7 @@ def _job(args: Namespace) -> int:
 
     from .adapters.base import SolveRequest
     from .adapters.crs import CrsAdapter
-    from .diagnose import DiagnosisRequest, diagnose
+    from .diagnose import DiagnosisRequest, diagnose, missing_build
     from .mus import minimize
     from .provenance import collect_constraints, installed_dependencies
     from .render import render_job
@@ -297,6 +301,8 @@ def _job(args: Namespace) -> int:
         print(f"conda-why: solver failed: {detail}", file=sys.stderr)
         return 1
 
+    report: WhyReport | None = None
+    scope_message: str | None = None
     with contextlib.redirect_stdout(sys.stderr):
         if result.ok:
             report = WhyReport(
@@ -309,42 +315,51 @@ def _job(args: Namespace) -> int:
                 ],
             )
         else:
+            missing = None
             if result.pinned_conflict is not None:
                 conflict = _pin_conflict_set(result, constraints, adapter)
-            elif result.error_kind == "not_found":
-                conflict = ConflictSet(
-                    constraints=[],
-                    provenance=[],
-                    solver=adapter.name,
-                    solver_calls=result.solver_calls,
-                    raw_error=result.raw_error,
-                )
             else:
-                conflict = minimize(
-                    adapter,
-                    request,
-                    constraints,
-                    seed=adapter.conflict_hint(result),
-                    prior_calls=result.solver_calls,
-                    raw_error=result.raw_error,
+                missing = missing_build(adapter, specs)
+                if missing is not None and not missing.other_subdirs:
+                    scope_message = missing.scope_message()
+                elif missing is not None:
+                    conflict = ConflictSet(
+                        constraints=[],
+                        provenance=[],
+                        solver=adapter.name,
+                        solver_calls=result.solver_calls,
+                        raw_error=result.raw_error,
+                    )
+                else:
+                    conflict = minimize(
+                        adapter,
+                        request,
+                        constraints,
+                        seed=adapter.conflict_hint(result),
+                        prior_calls=result.solver_calls,
+                        raw_error=result.raw_error,
+                    )
+            if report is None and scope_message is None:
+                diagnosis = diagnose(
+                    DiagnosisRequest(
+                        operation=operation,
+                        specs=specs,
+                        prefix=prefix,
+                        flags=_request_flags(args),
+                        constraints=list(constraints),
+                        installed=installed_dependencies(prefix),
+                        adapter=adapter,
+                        result=result,
+                        conflict=conflict,
+                        missing=missing,
+                    )
                 )
-            diagnosis = diagnose(
-                DiagnosisRequest(
-                    operation=operation,
-                    specs=specs,
-                    prefix=prefix,
-                    flags=_request_flags(args),
-                    constraints=list(constraints),
-                    installed=installed_dependencies(prefix),
-                    adapter=adapter,
-                    result=result,
-                    conflict=conflict,
+                report = WhyReport(
+                    mode="job", ok=False, diagnosis=diagnosis, conflict=conflict
                 )
-            )
-            report = WhyReport(
-                mode="job", ok=False, diagnosis=diagnosis, conflict=conflict
-            )
 
+    if report is None:
+        return _fail(args, scope_message or "no diagnosis", mode="job")
     if args.json:
         _write_json(report)
     else:

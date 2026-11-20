@@ -15,6 +15,7 @@ def test_help_exits_zero(
     assert "MODE" in result.stdout
     assert "query" in result.stdout
     assert "install" in result.stdout
+    assert "missing builds" in result.stdout
 
 
 @pytest.mark.parametrize(
